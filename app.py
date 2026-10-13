@@ -177,3 +177,14 @@ if submitted:
         weather_df,
         use_container_width=True
     )
+
+    csv_data = weather_df.to_csv(
+        index=False
+    ).encode("utf-8-sig")
+
+    st.download_button(
+        label="📥 Saatlik Tahminleri CSV Olarak İndir",
+        data=csv_data,
+        file_name="solar_production_forecast.csv",
+        mime="text/csv"
+    )
