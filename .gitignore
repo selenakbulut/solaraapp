@@ -1,0 +1,30 @@
+
+# Python sanal ortamları
+.venv/
+venv/
+env/
+
+# Python geçici dosyaları
+__pycache__/
+*.pyc
+
+# Yerel SQLite veritabanları
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Gizli bilgiler
+.env
+.env.*
+
+# IDE dosyaları
+.idea/
+.vscode/
+
+# Streamlit gizli ayarları
+.streamlit/secrets.toml
+
+# İşletim sistemi
+.DS_Store
+Thumbs.db
