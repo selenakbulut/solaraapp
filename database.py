@@ -89,6 +89,20 @@ CREATE TABLE IF NOT EXISTS production_forecasts (
 print("production_forecasts tablosu hazır.")
 
 
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS actual_production (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        site_id INTEGER NOT NULL,
+        production_time TEXT NOT NULL,
+        actual_energy_kwh REAL NOT NULL,
+        FOREIGN KEY (site_id) REFERENCES sites(id),
+        UNIQUE(site_id, production_time)
+    )
+""")
+
+print("actual_production tablosu hazır.")
+
+
 connection.commit()
 connection.close()
 

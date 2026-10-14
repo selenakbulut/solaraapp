@@ -188,3 +188,99 @@ if submitted:
         file_name="solar_production_forecast.csv",
         mime="text/csv"
     )
+
+
+# gercek uretim verisi yukleme
+
+st.subheader("Gerçek Üretim Verileri")
+
+uploaded_file = st.file_uploader(
+    "Gerçek üretim CSV dosyasını yükleyin",
+    type=["csv"]
+)
+
+if uploaded_file is not None:
+
+    actual_df = pd.read_csv(uploaded_file)
+
+    st.write("Yüklenen gerçek üretim verileri:")
+
+    st.dataframe(
+        actual_df,
+        use_container_width=True
+    )
+
+    st.success("CSV dosyası başarıyla okundu!")
+
+
+    required_columns = [
+        "production_time",
+        "actual_energy_kwh"
+    ]
+
+    if not all(col in actual_df.columns for col in required_columns):
+        st.error("CSV dosyasında gerekli sütunlar eksik!")
+
+    else:
+        actual_df["production_time"] = pd.to_datetime(
+            actual_df["production_time"],
+            errors="coerce"
+        )
+
+        actual_df["actual_energy_kwh"] = pd.to_numeric(
+            actual_df["actual_energy_kwh"],
+            errors="coerce"
+        )
+
+        invalid_rows = (
+            actual_df["production_time"].isna()
+            | actual_df["actual_energy_kwh"].isna()
+            | (actual_df["actual_energy_kwh"] < 0)
+        )
+
+        if invalid_rows.any():
+            st.error("CSV dosyasında geçersiz tarih veya üretim değeri var!")
+
+        elif actual_df["production_time"].duplicated().any():
+            st.error("CSV dosyasında aynı saat birden fazla kez bulunuyor!")
+
+        else:
+            if st.button("Gerçek Üretim Verilerini Kaydet"):
+
+                connection = sqlite3.connect("solar.db")
+                cursor = connection.cursor()
+
+                for _, row in actual_df.iterrows():
+
+                    production_time = row[
+                        "production_time"
+                    ].strftime("%Y-%m-%dT%H:%M")
+
+                    actual_energy = float(
+                        row["actual_energy_kwh"]
+                    )
+
+                    cursor.execute("""
+                        INSERT INTO actual_production (
+                            site_id,
+                            production_time,
+                            actual_energy_kwh
+                        )
+                        VALUES (?, ?, ?)
+
+                        ON CONFLICT(site_id, production_time)
+                        DO UPDATE SET
+                            actual_energy_kwh = excluded.actual_energy_kwh
+                    """, (
+                        1,
+                        production_time,
+                        actual_energy
+                    ))
+
+                connection.commit()
+                connection.close()
+
+                st.success(
+                    f"{len(actual_df)} gerçek üretim kaydı kaydedildi!"
+                )
+
