@@ -28,3 +28,10 @@ __pycache__/
 # İşletim sistemi
 .DS_Store
 Thumbs.db
+
+# Eski test ve yardımcı dosyalar
+check_weather.py
+compare_production.py
+daily_production.py
+check_sites.py
+save_forecast_run.py

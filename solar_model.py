@@ -22,10 +22,10 @@ def calculate_production(
     air_temp,
     dc_power_kwp,
     inverter_power_kw,
-    panel_age_years
+    panel_age_years,
+    temperature_coefficient = -0.004
 ):
     noct = 45
-    temperature_coefficient = -0.004
     dc_loss = 0.05
     ac_loss = 0.02
     annual_degradation = 0.005
@@ -46,6 +46,12 @@ def calculate_production(
         dc_power_kw,
         inverter_power_kw
     )
+    potential_ac_power_kw = dc_power_kw * efficiency
+
+    clipping_loss_kwh = max(
+        0,
+        potential_ac_power_kw - inverter_power_kw
+    ) * (1 - ac_loss)
 
     ac_power_kw = min(
         dc_power_kw * efficiency,
@@ -54,4 +60,4 @@ def calculate_production(
 
     final_energy_kwh = ac_power_kw * (1 - ac_loss)
 
-    return final_energy_kwh
+    return final_energy_kwh, clipping_loss_kwh
