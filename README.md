@@ -31,4 +31,4 @@ streamlit run app.py
 ## Geliştirme durumu
 
 Proje geliştirme aşamasındadır.
-CSV dışa aktarma ve gerçek üretim karşılaştırması sonraki adımlardır.
+
