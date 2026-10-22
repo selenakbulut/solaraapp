@@ -3,6 +3,7 @@
 .venv/
 venv/
 env/
+logs/
 
 # Python geçici dosyaları
 __pycache__/
@@ -29,12 +30,3 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Eski test ve yardımcı dosyalar
-check_weather.py
-compare_production.py
-daily_production.py
-check_sites.py
-save_forecast_run.py
-
-actual_test.csv
-check_api_requests.py

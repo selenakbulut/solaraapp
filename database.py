@@ -1,5 +1,5 @@
-
 import sqlite3
+from logger_config import logger
 
 connection = sqlite3.connect("solar.db")
 connection.execute("PRAGMA foreign_keys = ON")
@@ -21,7 +21,7 @@ cursor.execute("""
     )
 """)
 
-print("sites tablosu hazır.")
+logger.info("sites tablosu hazır.")
 
 
 cursor.execute("PRAGMA table_info(sites)")
@@ -34,7 +34,10 @@ new_columns = {
     "panel_count": "INTEGER",
     "panel_power_wp": "REAL",
     "ac_power_kw": "REAL",
-    "site_age_years": "REAL"
+    "site_age_years": "REAL",
+    "elevation": "REAL",
+    "timezone": "TEXT",
+    "mounting_type": "TEXT"
 }
 
 for column_name, column_type in new_columns.items():
@@ -46,10 +49,10 @@ for column_name, column_type in new_columns.items():
             f"ADD COLUMN {column_name} {column_type}"
         )
 
-        print(column_name, "sütunu eklendi.")
+        logger.info("%s sütunu eklendi.", column_name)
 
     else:
-        print(column_name, "zaten mevcut.")
+        logger.info("%s zaten mevcut.", column_name)
 
 
 site_name = "Ankara GES"
@@ -67,9 +70,9 @@ if existing_site is None:
         VALUES (?, ?, ?, ?, ?)
     """, (site_name, 39.9334, 32.8597, 20, 0))
 
-    print("Yeni santral eklendi.")
+    logger.info("Yeni santral eklendi.")
 else:
-    print("Bu santral zaten kayıtlı.")
+    logger.info("Bu santral zaten kayıtlı.")
 
 
 cursor.execute("""
@@ -92,7 +95,7 @@ cursor.execute("""
     "Ankara GES"
 ))
 
-print("Ankara GES teknik bilgileri kontrol edildi.")
+logger.info("Ankara GES teknik bilgileri kontrol edildi.")
 
 
 cursor.execute("""
@@ -126,7 +129,7 @@ CREATE TABLE IF NOT EXISTS api_requests (
 )
 """)
 
-print("api_requests tablosu hazır.")
+logger.info("api_requests tablosu hazır.")
 
 
 cursor.execute("""
@@ -145,7 +148,7 @@ CREATE TABLE IF NOT EXISTS production_forecasts (
 )
 """)
 
-print("production_forecasts tablosu hazır.")
+logger.info("production_forecasts tablosu hazır.")
 
 
 cursor.execute("""
@@ -165,7 +168,51 @@ cursor.execute("""
     )
 """)
 
-print("forecast_runs tablosu hazır.")
+logger.info("forecast_runs tablosu hazır.")
+
+cursor.execute("PRAGMA table_info(forecast_runs)")
+
+run_columns = [
+    column[1] for column in cursor.fetchall()
+]
+
+if "mounting_type" not in run_columns:
+    cursor.execute("""
+        ALTER TABLE forecast_runs
+        ADD COLUMN mounting_type TEXT
+    """)
+
+    logger.info("forecast_runs tablosuna mounting_type eklendi.")
+
+existing_columns = [
+    column[1] for column in cursor.fetchall()
+]
+
+loss_columns = [
+    "soiling_loss",
+    "reflection_loss",
+    "mismatch_loss",
+    "dc_cable_loss",
+    "ac_cable_loss",
+    "transformer_loss",
+    "shading_loss",
+    "availability_loss",
+    "snow_loss"
+]
+
+for column_name in loss_columns:
+
+    if column_name not in run_columns:
+
+        cursor.execute(
+            f"ALTER TABLE forecast_runs "
+            f"ADD COLUMN {column_name} REAL"
+        )
+
+        logger.info(
+            "%s sütunu forecast_runs tablosuna eklendi.",
+            column_name
+        )
 
 
 cursor.execute("""
@@ -181,7 +228,7 @@ cursor.execute("""
     )
 """)
 
-print("forecast_results tablosu hazır.")
+logger.info("forecast_results tablosu hazır.")
 
 cursor.execute("PRAGMA table_info(forecast_results)")
 
@@ -203,10 +250,10 @@ for column_name, column_type in new_columns.items():
             f"ADD COLUMN {column_name} {column_type}"
         )
 
-        print(column_name, "sütunu eklendi.")
+        logger.info("%s sütunu eklendi.", column_name)
 
     else:
-        print(column_name, "zaten mevcut.")
+        logger.info("%s zaten mevcut.", column_name)
 
 
 cursor.execute("""
@@ -220,7 +267,7 @@ cursor.execute("""
     )
 """)
 
-print("actual_production tablosu hazır.")
+logger.info("actual_production tablosu hazır.")
 
 
 cursor.execute("""
@@ -240,9 +287,146 @@ cursor.execute("""
     )
 """)
 
-print("site_losses tablosu hazır.")
+logger.info("site_losses tablosu hazır.")
+
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS forecast_assumptions (
+        run_id INTEGER PRIMARY KEY,
+        dc_loss REAL NOT NULL,
+        ac_loss REAL NOT NULL,
+        temperature_coefficient REAL NOT NULL,
+        annual_degradation REAL NOT NULL,
+        explanation TEXT NOT NULL,
+
+        FOREIGN KEY (run_id)
+        REFERENCES forecast_runs(id)
+    )
+""")
+
+logger.info("forecast_assumptions tablosu hazır.")
+
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS geocoding_cache (
+        query_name TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        latitude REAL NOT NULL,
+        longitude REAL NOT NULL,
+        elevation REAL,
+        timezone TEXT,
+        fetched_at TEXT NOT NULL
+    )
+""")
+
+logger.info("geocoding_cache tablosu hazır.")
 
 connection.commit()
 connection.close()
 
-print("Veritabanı hazır.")
+logger.info("Veritabanı hazır.")
+
+def get_site_losses(site_id):
+    connection = sqlite3.connect("solar.db")
+
+    try:
+        cursor = connection.cursor()
+
+        cursor.execute("""
+            SELECT
+                soiling_loss,
+                reflection_loss,
+                mismatch_loss,
+                dc_cable_loss,
+                ac_cable_loss,
+                transformer_loss,
+                shading_loss,
+                availability_loss,
+                snow_loss
+            FROM site_losses
+            WHERE site_id = ?
+        """, (site_id,))
+
+        row = cursor.fetchone()
+
+        if row is None:
+            return None
+
+        columns = [
+            "soiling_loss",
+            "reflection_loss",
+            "mismatch_loss",
+            "dc_cable_loss",
+            "ac_cable_loss",
+            "transformer_loss",
+            "shading_loss",
+            "availability_loss",
+            "snow_loss"
+        ]
+
+        return dict(zip(columns, row))
+
+    finally:
+        connection.close()
+
+def save_site_losses(site_id, losses):
+
+    columns = [
+        "soiling_loss",
+        "reflection_loss",
+        "mismatch_loss",
+        "dc_cable_loss",
+        "ac_cable_loss",
+        "transformer_loss",
+        "shading_loss",
+        "availability_loss",
+        "snow_loss"
+    ]
+
+    if set(losses.keys()) != set(columns):
+        raise ValueError("Dokuz kayıp katsayısının tamamı belirtilmelidir.")
+
+    for name, value in losses.items():
+        if not isinstance(value, (int, float)) or not 0 <= value < 1:
+            raise ValueError(
+                f"{name} için kayıp oranı 0 ile 1 arasında olmalıdır."
+            )
+
+    connection = sqlite3.connect("solar.db")
+    connection.execute("PRAGMA foreign_keys = ON")
+
+    try:
+        cursor = connection.cursor()
+
+        cursor.execute("""
+                       INSERT INTO site_losses (
+                           site_id,
+                           soiling_loss,
+                           reflection_loss,
+                           mismatch_loss,
+                           dc_cable_loss,
+                           ac_cable_loss,
+                           transformer_loss,
+                           shading_loss,
+                           availability_loss,
+                           snow_loss)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) 
+                           ON CONFLICT(site_id)
+                           DO UPDATE SET
+                               soiling_loss = excluded.soiling_loss,
+                               reflection_loss = excluded.reflection_loss,
+                               mismatch_loss = excluded.mismatch_loss,
+                               dc_cable_loss = excluded.dc_cable_loss,
+                               ac_cable_loss = excluded.ac_cable_loss,
+                               transformer_loss = excluded.transformer_loss,
+                               shading_loss = excluded.shading_loss,
+                               availability_loss = excluded.availability_loss,
+                               snow_loss = excluded.snow_loss
+                       """, (
+                           site_id,
+                           *[losses[column] for column in columns]
+                       ))
+
+        connection.commit()
+
+
+    finally:
+        connection.close()

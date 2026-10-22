@@ -1,9 +1,14 @@
 from solar_model import calculate_production
 from save_weather import save_weather_data
 from production import save_forecast
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from io import BytesIO
+from database import get_site_losses, save_site_losses
+from geocoding import  get_coordinates
+from timezonefinder import timezone_at
 
+import requests
 import altair as alt
 import sqlite3
 import pandas as pd
@@ -18,22 +23,45 @@ st.set_page_config(
 st.title("☀️ Güneş Enerjisi Üretim Tahmini")
 st.write("Güneş Enerjisi Üretim Tahmini")
 
+turkey_now = datetime.now(ZoneInfo("Europe/Istanbul"))
+
+day_start = turkey_now.replace(
+    hour=0,
+    minute=0,
+    second=0,
+    microsecond=0
+)
+
+day_end = day_start + timedelta(days=1)
+
+utc_start = day_start.astimezone(timezone.utc).isoformat()
+utc_end = day_end.astimezone(timezone.utc).isoformat()
+
 connection = sqlite3.connect("solar.db")
-cursor = connection.cursor()
 
-cursor.execute("""
-               SELECT COUNT(*)
-               FROM api_requests
-               WHERE date (requested_at) = ?
-               """, (datetime.now().strftime("%Y-%m-%d"),))
+try:
+    cursor = connection.cursor()
 
-daily_api_count = cursor.fetchone()[0]
+    cursor.execute("""
+        SELECT COUNT(*)
+        FROM api_requests
+        WHERE requested_at >= ?
+          AND requested_at < ?
+    """, (utc_start, utc_end))
 
-connection.close()
+    daily_api_count = cursor.fetchone()[0]
+
+finally:
+    connection.close()
 
 st.metric("Bugünkü API İstek Sayısı", daily_api_count)
 
 st.subheader("Santral Bilgileri")
+st.caption(
+    "Model varsayımı: Sabit panel montajı ve NOCT = 45°C "
+    "kullanılmaktadır. Montaj tipine özel soğutma etkileri "
+    "henüz ayrıca modellenmemektedir."
+)
 
 connection = sqlite3.connect("solar.db")
 
@@ -69,7 +97,141 @@ if "site_success_message" in st.session_state:
         st.session_state.pop("site_success_message")
     )
 
+with st.expander("⚙️ Gelişmiş Kayıp Ayarları"):
+
+    saved_losses = get_site_losses(int(selected_site_id))
+
+    if saved_losses is None:
+        st.info(
+            "Bu santral için özel kayıp katsayıları kaydedilmemiş. "
+            "Tahminlerde mevcut varsayılan DC %5 ve AC %2 "
+            "kayıpları kullanılır."
+        )
+
+    else:
+        st.success("Bu santralin kayıtlı kayıp katsayıları:")
+
+        for loss_name, loss_value in saved_losses.items():
+            st.write(
+                f"{loss_name}: %{loss_value * 100:.2f}"
+            )
+
+    loss_labels = {
+        "soiling_loss": "Kirlenme Kaybı (%)",
+        "reflection_loss": "Yansıma Kaybı (%)",
+        "mismatch_loss": "Panel Uyumsuzluk Kaybı (%)",
+        "dc_cable_loss": "DC Kablo Kaybı (%)",
+        "ac_cable_loss": "AC Kablo Kaybı (%)",
+        "transformer_loss": "Trafo Kaybı (%)",
+        "shading_loss": "Gölgelenme Kaybı (%)",
+        "availability_loss": "Kullanılabilirlik Kaybı (%)",
+        "snow_loss": "Kar Kaybı (%)"
+    }
+
+    edited_losses = {}
+
+    for loss_name, label in loss_labels.items():
+
+        current_value = (
+            saved_losses[loss_name]
+            if saved_losses is not None
+            else 0.0
+        )
+
+        percentage = st.number_input(
+            label,
+            min_value=0.0,
+            max_value=99.99,
+            value=float(current_value * 100),
+            step=0.5,
+            format="%.2f",
+            key=f"loss_{selected_site_id}_{loss_name}"
+        )
+
+        edited_losses[loss_name] = percentage / 100
+
+    st.warning(
+        "Özel kayıp ayarları kaydedildiğinde varsayılan "
+        "DC %5 ve AC %2 kayıpları yerine buradaki "
+        "dokuz katsayı kullanılacaktır. "
+        "%0 girilen kalemler sıfır kayıp kabul edilir."
+    )
+
+    confirm_losses = st.checkbox(
+        "Bu kayıp değerlerini kullanmak istediğimi onaylıyorum.",
+        key=f"confirm_losses_{selected_site_id}"
+    )
+
+    if st.button(
+        "💾 Kayıp Ayarlarını Kaydet",
+        key=f"save_losses_{selected_site_id}"
+    ):
+
+        if not confirm_losses:
+            st.error("Kaydetmeden önce onay kutusunu işaretleyin.")
+
+        else:
+            try:
+                save_site_losses(
+                    int(selected_site_id),
+                    edited_losses
+                )
+
+                st.success("Kayıp ayarları başarıyla kaydedildi!")
+
+            except (ValueError, sqlite3.Error) as error:
+                st.error(f"Kayıp ayarları kaydedilemedi: {error}")
+
+if "new_site_latitude" not in st.session_state:
+    st.session_state["new_site_latitude"] = 39.9334
+
+if "new_site_longitude" not in st.session_state:
+    st.session_state["new_site_longitude"] = 32.8597
+
 with st.expander("➕ Yeni Santral Ekle"):
+    location_name = st.text_input(
+        "Şehir veya İlçe Adı (İsteğe Bağlı)",
+        placeholder="Örn: Ankara, Antalya, Manavgat",
+        key="location_search"
+    )
+
+    if st.button("📍 Konumu Bul", key="find_location"):
+
+        try:
+            location = get_coordinates(location_name)
+
+            if location is None:
+                st.error("Konum bulunamadı.")
+
+            else:
+                st.session_state["new_site_latitude"] = float(
+                    location["latitude"]
+                )
+
+                st.session_state["new_site_longitude"] = float(
+                    location["longitude"]
+                )
+
+                st.session_state["new_site_location_metadata"] = {
+                    "latitude": float(location["latitude"]),
+                    "longitude": float(location["longitude"]),
+                    "elevation": location.get("elevation"),
+                    "timezone": location.get("timezone")
+                }
+
+                st.success(
+                    f"Konum bulundu: {location['name']}"
+                )
+
+                st.info(
+                    "Koordinatlar forma aktarıldı. "
+                    "Santrali kaydetmeden önce doğru "
+                    "konum olduğunu kontrol edin."
+                )
+
+        except (ValueError, sqlite3.Error, requests.RequestException) as error:
+            st.error(f"Konum aranamadı: {error}")
+
     with st.form("new_site_form"):
         new_site_name = st.text_input("Santral Adı")
 
@@ -77,16 +239,16 @@ with st.expander("➕ Yeni Santral Ekle"):
             "Enlem (Latitude)",
             min_value=-90.0,
             max_value=90.0,
-            value=39.9334,
-            format="%.6f"
+            format="%.6f",
+            key="new_site_latitude"
         )
 
         new_longitude = st.number_input(
             "Boylam (Longitude)",
             min_value=-180.0,
             max_value=180.0,
-            value=32.8597,
-            format="%.6f"
+            format="%.6f",
+            key="new_site_longitude"
         )
 
         new_panel_count = st.number_input(
@@ -132,6 +294,13 @@ with st.expander("➕ Yeni Santral Ekle"):
             value=0
         )
 
+        st.caption(
+            "Montaj tipi: Arazi tipi (varsayılan). "
+            "Panel açıları sabit kabul edilir. "
+            "Montaj tipine özel soğutma etkileri "
+            "henüz hesaplanmamaktadır."
+        )
+
         new_site_submitted = st.form_submit_button(
             "Santrali Kaydet"
         )
@@ -142,6 +311,39 @@ if new_site_submitted:
         st.error("Santral adı boş bırakılamaz.")
 
     else:
+        location_metadata = st.session_state.get(
+            "new_site_location_metadata"
+        )
+
+        if (
+            location_metadata is not None
+            and abs(
+                new_latitude - location_metadata["latitude"]
+            ) < 0.000001
+            and abs(
+                new_longitude - location_metadata["longitude"]
+            ) < 0.000001
+        ):
+            new_elevation = location_metadata["elevation"]
+            new_timezone = location_metadata["timezone"]
+
+        else:
+            new_elevation = None
+            new_timezone = None
+
+        if not new_timezone:
+            new_timezone = timezone_at(
+                lat=float(new_latitude),
+                lng=float(new_longitude)
+            )
+
+        if not new_timezone:
+            st.error(
+                "Bu koordinatlar için saat dilimi belirlenemedi. "
+                "Lütfen konumu kontrol edin."
+            )
+            st.stop()
+
         new_dc_power_kwp = (
                 new_panel_count * new_panel_power / 1000
         )
@@ -192,11 +394,13 @@ if new_site_submitted:
                     "Bu santral aynı isim ve teknik bilgilerle zaten kayıtlı!"
                 )
             else:
+                new_mounting_type = "Arazi"
                 cursor.execute("""
                                INSERT INTO sites (name, latitude, longitude,
                                                   panel_count, panel_power_wp,
-                                                  ac_power_kw, tilt, azimuth, site_age_years)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                                  ac_power_kw, tilt, azimuth, site_age_years,
+                                                  elevation, timezone, mounting_type)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                """, (
                                    new_site_name.strip(),
                                    new_latitude,
@@ -206,7 +410,10 @@ if new_site_submitted:
                                    new_ac_power,
                                    new_tilt,
                                    new_azimuth,
-                                   new_site_age
+                                   new_site_age,
+                                   new_elevation,
+                                   new_timezone,
+                                   new_mounting_type
                                ))
 
                 connection.commit()
@@ -275,6 +482,23 @@ with st.form("solar_form"):
         value=int(site["site_age_years"])
     )
 
+    temperature_coefficient_percent = st.number_input(
+        "Panel Sıcaklık Katsayısı (%/°C)",
+        min_value=-2.0,
+        max_value=0.0,
+        value=-0.40,
+        step=0.05,
+        format="%.2f",
+        help=(
+            "Varsayılan: -%0,4/°C. "
+            "Panel sıcaklığı arttıkça üretim azalır."
+        )
+    )
+
+    temperature_coefficient = (
+        temperature_coefficient_percent / 100
+    )
+
     submitted = st.form_submit_button(
         "Tahmin Oluştur"
     )
@@ -319,11 +543,135 @@ if submitted:
         )
         st.stop()
 
-    start_time, end_time = save_weather_data(
-        int(selected_site_id),
-        tilt,
-        azimuth
-    )
+    try:
+        start_time, end_time = save_weather_data(
+            int(selected_site_id),
+            tilt,
+            azimuth
+        )
+
+    except requests.RequestException:
+
+        st.warning(
+            "Open-Meteo servisine ulaşılamadı. "
+            "Daha önce kaydedilmiş tahminler kontrol ediliyor."
+        )
+
+        connection = sqlite3.connect("solar.db")
+
+        try:
+            last_run = pd.read_sql_query("""
+                 SELECT 
+                     id,
+                     created_at
+                 FROM forecast_runs
+                 WHERE site_id = ?
+                 ORDER BY id DESC 
+                 LIMIT 1
+            """, connection, params=(int(selected_site_id),))
+
+            if last_run.empty:
+                st.error(
+                    "Bu santral için kayıtlı tahmin bulunamadı. "
+                    "İnternet bağlantısı sağlandığında tekrar deneyin."
+                )
+                st.stop()
+
+            last_run_id = int(last_run.iloc[0]["id"])
+
+            cached_forecast = pd.read_sql_query("""
+                SELECT 
+                    forecast_time,
+                    predicted_energy_kwh,
+                    cell_temperature,
+                    clipping_loss_kwh
+                FROM forecast_results
+                WHERE run_id = ?
+                ORDER BY forecast_time
+            """, connection, params=(last_run_id,))
+
+            weather_age_info = pd.read_sql_query("""
+                                             SELECT
+                                                 MIN(w.fetched_at) AS oldest_fetched_at,
+                                                 COUNT(w.id) AS matched_hours,
+                                                 COUNT(f.id) AS total_hours
+                                             FROM forecast_results AS f
+                                             JOIN forecast_runs AS r
+                                                ON r.id = f.run_id
+                                             LEFT JOIN weather_data AS w
+                                                ON w.site_id = r.site_id
+                                                AND w.forecast_time = f.forecast_time
+                                                AND w.tilt = r.tilt
+                                                AND w.azimuth = r.azimuth
+                                             WHERE f.run_id = ?
+            """, connection, params=(last_run_id,))
+
+        finally:
+            connection.close()
+
+        created_at = pd.to_datetime(
+            last_run.iloc[0]["created_at"],
+            utc=True
+        )
+
+        age_hours = (
+            pd.Timestamp.now(tz="UTC") - created_at
+        ).total_seconds() / 3600
+
+        st.warning(
+            f"Gösterilen tahmin {age_hours:.1f} saat önce "
+            f"oluşturulmuştur. Tahmin ID: {last_run_id}. "
+            "Bu, yeni bir tahmin değildir."
+        )
+
+        oldest_fetched_at = weather_age_info.iloc[0]["oldest_fetched_at"]
+
+        if pd.notna(oldest_fetched_at):
+            fetched_at = pd.to_datetime(
+                oldest_fetched_at,
+                utc=True
+            )
+
+            weather_age_hours = (
+                pd.Timestamp.now(tz="UTC") - fetched_at
+            ).total_seconds() / 3600
+
+            matched_hours = int(
+                weather_age_info.iloc[0]["matched_hours"]
+            )
+
+            total_hours = int(
+                weather_age_info.iloc[0]["total_hours"]
+            )
+
+            st.warning(
+                f"Kayıtlı hava verisinin en eski çekim yaşı: "
+                f"{weather_age_hours:.1f} saat. "
+                f"Eşleşen saat sayısı: "
+                f"{matched_hours}/{total_hours}."
+            )
+
+        else:
+            st.warning(
+                "Bu tahmine ait hava verisinin çekim zamanı "
+                "bulunamadı. Veri yaşı belirlenemiyor."
+            )
+
+        st.subheader("Son Kaydedilen Tahmin")
+
+        st.dataframe(
+            cached_forecast,
+            hide_index=True,
+            width="stretch"
+        )
+
+        st.info(
+            "Bu tahminin tarihi veya teknik parametreleri "
+            "şu anda seçtiğiniz değerlerden farklı olabilir. "
+            "Yeni tahmin oluşturulmadı."
+        )
+
+        st.stop()
 
     st.success("Santral bilgileri alındı!")
 
@@ -369,6 +717,8 @@ if submitted:
             + ((45 - 20) / 800) * weather_df["tilted_radiation"]
     )
 
+    site_losses = get_site_losses(int(selected_site_id))
+
     clipping_losses = []
     for _, row in weather_df.iterrows():
         energy, clipping = calculate_production(
@@ -376,7 +726,9 @@ if submitted:
             air_temp=row["temperature"],
             dc_power_kwp=dc_power_kwp,
             inverter_power_kw=inverter_power_kw,
-            panel_age_years=panel_age
+            panel_age_years=panel_age,
+            temperature_coefficient=temperature_coefficient,
+            **(site_losses or {})
         )
 
         predictions.append(energy)
@@ -422,7 +774,9 @@ if submitted:
         site_age_years=panel_age,
         tilt=tilt,
         azimuth=azimuth,
-        weather_df=weather_df
+        weather_df=weather_df,
+        site_losses = site_losses,
+        temperature_coefficient=temperature_coefficient
     )
 
     st.success(
@@ -704,7 +1058,7 @@ if submitted:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-st.subheader("Üretim Senaryo Karşılaştırması")
+st.subheader("Üretim Tahmini Karşılaştırması")
 
 connection = sqlite3.connect("solar.db")
 
@@ -758,14 +1112,14 @@ if len(scenario_runs_df) >= 2:
 
     with col1:
         scenario_1 = st.selectbox(
-            "Birinci Senaryo",
+            "Birinci Üretim Tahmini",
             options=scenario_runs_df["run_id"].tolist(),
             format_func=lambda run_id: scenario_labels[run_id]
         )
 
     with col2:
         scenario_2 = st.selectbox(
-            "İkinci Senaryo",
+            "İkinci Üretim Tahmini",
             options=scenario_runs_df["run_id"].tolist(),
             index=1,
             format_func=lambda run_id: scenario_labels[run_id]
@@ -800,7 +1154,7 @@ if len(scenario_runs_df) >= 2:
 
         if len(changed_parameters) == 0:
             st.warning(
-                "İki senaryonun teknik özellikleri aynı. "
+                "İki tahminin teknik özellikleri aynı. "
                 "En az bir parametre farklı olmalıdır."
             )
 
@@ -840,7 +1194,7 @@ if len(scenario_runs_df) >= 2:
 
         if scenario_comparison_df.empty:
             st.warning(
-                "Seçilen senaryoların ortak tahmin saati bulunmuyor."
+                "Seçilen üretim tahminlerinin ortak tahmin saati bulunmuyor."
             )
         else:
             st.write(
@@ -869,13 +1223,13 @@ if len(scenario_runs_df) >= 2:
 
             with col1:
                 st.metric(
-                    "Senaryo 1 Üretimi",
+                    "Tahmin 1 Üretimi",
                     f"{total_1:.2f} kWh"
                 )
 
             with col2:
                 st.metric(
-                    "Senaryo 2 Üretimi",
+                    "Tahmin 2 Üretimi",
                     f"{total_2:.2f} kWh"
                 )
 
@@ -890,13 +1244,13 @@ if len(scenario_runs_df) >= 2:
                     )
                 )
 
-            st.subheader("Saatlik Senaryo Karşılaştırması")
+            st.subheader("Saatlik Üretim Tahmini Karşılaştırması")
 
             hourly_scenario_display = scenario_comparison_df.rename(
                 columns={
                     "forecast_time": "Tarih / Saat",
-                    "scenario_1_kwh": "Senaryo 1 Üretimi (kWh)",
-                    "scenario_2_kwh": "Senaryo 2 Üretimi (kWh)",
+                    "scenario_1_kwh": "Tahmin 1 Üretimi (kWh)",
+                    "scenario_2_kwh": "Tahmin 2 Üretimi (kWh)",
                     "difference_kwh": "Üretim Farkı (kWh)"
                 }
             )
@@ -906,10 +1260,10 @@ if len(scenario_runs_df) >= 2:
                 width="stretch",
                 hide_index=True,
                 column_config={
-                    "Senaryo 1 Üretimi (kWh)": st.column_config.NumberColumn(
+                    "Tahmin 1 Üretimi (kWh)": st.column_config.NumberColumn(
                         format="%.3f"
                     ),
-                    "Senaryo 2 Üretimi (kWh)": st.column_config.NumberColumn(
+                    "Tahmin 2 Üretimi (kWh)": st.column_config.NumberColumn(
                         format="%.3f"
                     ),
                     "Üretim Farkı (kWh)": st.column_config.NumberColumn(
@@ -921,92 +1275,222 @@ if len(scenario_runs_df) >= 2:
 else:
     st.info("Karşılaştırma için en az iki tahmin gereklidir.")
 
+
 st.subheader("Gerçek Üretim Verileri")
 
 uploaded_file = st.file_uploader(
-    "Gerçek üretim CSV dosyasını yükleyin",
-    type=["csv"]
+    "Gerçek üretim CSV veya Excel dosyasını yükleyin",
+    type=["csv", "xlsx"]
 )
 
 if uploaded_file is not None:
 
-    actual_df = pd.read_csv(uploaded_file)
+    if uploaded_file.name.lower().endswith(".csv"):
+        actual_df = pd.read_csv(uploaded_file)
+    else:
+        actual_df = pd.read_excel(uploaded_file)
 
-    st.write("Yüklenen gerçek üretim verileri:")
+    st.write("Yüklenen dosya:")
+    st.dataframe(actual_df.head(10), hide_index=True)
+
+    columns = actual_df.columns.tolist()
+
+    if len(columns) < 2:
+        st.error("Dosyada en az iki sütun bulunmalıdır.")
+        st.stop()
+
+    time_column = st.selectbox(
+        "Tarih ve saat hangi sütunda?",
+        options=columns
+    )
+
+    energy_columns = [
+        col for col in columns if col != time_column
+    ]
+
+    energy_column = st.selectbox(
+        "Gerçek üretim hangi sütunda?",
+        options=energy_columns
+    )
+
+    site_columns = [
+        "Saha sütunu yok (tek santral)"
+    ] + [
+        col for col in columns
+        if col not in [time_column, energy_column]
+    ]
+
+    site_column = st.selectbox(
+        "Santral / saha bilgisi hangi sütunda?",
+        options=site_columns
+    )
+
+    energy_unit = st.selectbox(
+        "Üretim değerlerinin birimi",
+        options=["kWh", "MWh"]
+    )
+
+    result_df = pd.DataFrame()
+
+    result_df["production_time"] = pd.to_datetime(
+        actual_df[time_column],
+        errors="coerce",
+        dayfirst=True
+    )
+
+    result_df["actual_energy_kwh"] = pd.to_numeric(
+        actual_df[energy_column],
+        errors="coerce"
+    )
+
+    if energy_unit == "MWh":
+        result_df["actual_energy_kwh"] *= 1000
+
+    if site_column == "Saha sütunu yok (tek santral)":
+
+        result_df["site_id"] = int(selected_site_id)
+
+    else:
+
+        source_sites = (
+            actual_df[site_column]
+            .astype("string")
+            .str.strip()
+        )
+
+        if source_sites.isna().any() or source_sites.eq("").any():
+            st.error("Dosyada boş saha bilgisi bulunuyor.")
+            st.stop()
+
+        unique_sites = sorted(source_sites.unique().tolist())
+
+        site_mapping = {}
+
+        for source_name in unique_sites:
+
+            matched_site_id = st.selectbox(
+                f"'{source_name}' hangi santral?",
+                options=site_df["id"].astype(int).tolist(),
+                format_func=lambda sid: site_df.loc[
+                    site_df["id"] == sid, "name"
+                ].iloc[0],
+                key=f"actual_mapping_{source_name}"
+            )
+
+            site_mapping[source_name] = int(matched_site_id)
+
+        if len(set(site_mapping.values())) != len(site_mapping):
+            st.error(
+                "Farklı saha değerleri aynı santrale eşleştirilmiş."
+            )
+            st.stop()
+
+        result_df["site_id"] = source_sites.map(site_mapping)
+
+    invalid_rows = (
+        result_df["production_time"].isna()
+        | result_df["actual_energy_kwh"].isna()
+        | (result_df["actual_energy_kwh"] < 0)
+        | result_df["site_id"].isna()
+    )
+
+    if invalid_rows.any():
+        st.error(
+            "Dosyada geçersiz tarih, üretim veya saha bilgisi var."
+        )
+        st.stop()
+
+    result_df["production_time"] = (
+        result_df["production_time"]
+        .dt.strftime("%Y-%m-%dT%H:%M")
+    )
+
+    if result_df.duplicated(
+        subset=["site_id", "production_time"]
+    ).any():
+
+        st.error(
+            "Aynı santrale ait aynı saat birden fazla kez bulunuyor."
+        )
+        st.stop()
+
+    name_mapping = dict(
+        zip(site_df["id"], site_df["name"])
+    )
+
+    preview_df = result_df.copy()
+
+    preview_df["site_name"] = (
+        preview_df["site_id"].map(name_mapping)
+    )
+
+    st.subheader("Kaydedilecek Verilerin Önizlemesi")
 
     st.dataframe(
-        actual_df,
+        preview_df[
+            [
+                "site_name",
+                "production_time",
+                "actual_energy_kwh"
+            ]
+        ],
+        hide_index=True,
         width="stretch"
     )
 
-    st.success("CSV dosyası başarıyla okundu!")
+    st.info(
+        f"Toplam {len(result_df)} saatlik üretim kaydı hazır."
+    )
 
-    required_columns = [
-        "production_time",
-        "actual_energy_kwh"
-    ]
+    confirmed = st.checkbox(
+        "Saha eşleştirmelerini, saatleri ve üretim "
+        "birimini kontrol ettim."
+    )
 
-    if not all(col in actual_df.columns for col in required_columns):
-        st.error("CSV dosyasında gerekli sütunlar eksik!")
+    if st.button(
+        "Gerçek Üretim Verilerini Kaydet",
+        disabled=not confirmed
+    ):
 
-    else:
-        actual_df["production_time"] = pd.to_datetime(
-            actual_df["production_time"],
-            errors="coerce"
-        )
+        connection = sqlite3.connect("solar.db")
 
-        actual_df["actual_energy_kwh"] = pd.to_numeric(
-            actual_df["actual_energy_kwh"],
-            errors="coerce"
-        )
+        try:
+            cursor = connection.cursor()
 
-        invalid_rows = (
-                actual_df["production_time"].isna()
-                | actual_df["actual_energy_kwh"].isna()
-                | (actual_df["actual_energy_kwh"] < 0)
-        )
-
-        if invalid_rows.any():
-            st.error("CSV dosyasında geçersiz tarih veya üretim değeri var!")
-
-        elif actual_df["production_time"].duplicated().any():
-            st.error("CSV dosyasında aynı saat birden fazla kez bulunuyor!")
-
-        else:
-            if st.button("Gerçek Üretim Verilerini Kaydet"):
-
-                connection = sqlite3.connect("solar.db")
-                cursor = connection.cursor()
-
-                for _, row in actual_df.iterrows():
-                    production_time = row[
-                        "production_time"
-                    ].strftime("%Y-%m-%dT%H:%M")
-
-                    actual_energy = float(
-                        row["actual_energy_kwh"]
-                    )
-
-                    cursor.execute("""
-                                   INSERT INTO actual_production (site_id,
-                                                                  production_time,
-                                                                  actual_energy_kwh)
-                                   VALUES (?, ?, ?) ON CONFLICT(site_id, production_time)
-                        DO
-                                   UPDATE SET
-                                       actual_energy_kwh = excluded.actual_energy_kwh
-                                   """, (
-                                       int(selected_site_id),
-                                       production_time,
-                                       actual_energy
-                                   ))
-
-                connection.commit()
-                connection.close()
-
-                st.success(
-                    f"{len(actual_df)} gerçek üretim kaydı kaydedildi!"
+            rows_to_save = [
+                (
+                    int(row.site_id),
+                    row.production_time,
+                    float(row.actual_energy_kwh)
                 )
+                for row in result_df.itertuples(index=False)
+            ]
+
+            cursor.executemany("""
+                INSERT INTO actual_production (
+                    site_id,
+                    production_time,
+                    actual_energy_kwh
+                )
+                VALUES (?, ?, ?)
+                ON CONFLICT(site_id, production_time)
+                DO UPDATE SET
+                    actual_energy_kwh = excluded.actual_energy_kwh
+            """, rows_to_save)
+
+            connection.commit()
+
+            st.success(
+                f"{len(rows_to_save)} gerçek üretim kaydı kaydedildi!"
+            )
+
+        except sqlite3.Error as error:
+            connection.rollback()
+            st.error(f"Kayıt hatası: {error}")
+
+        finally:
+            connection.close()
+
 
 st.subheader("Tahmin ve Gerçek Üretim Karşılaştırması")
 
@@ -1137,10 +1621,40 @@ else:
 
     rmse = (
                    (
-                           comparison_df["predicted_energy_kwh"]
-                           - comparison_df["actual_energy_kwh"]
+                       comparison_df["predicted_energy_kwh"]
+                       - comparison_df["actual_energy_kwh"]
                    ) ** 2
            ).mean() ** 0.5
+
+    connection = sqlite3.connect("solar.db")
+
+    try:
+        run_parameters = connection.execute("""
+            SELECT panel_count, panel_power_wp
+            FROM forecast_runs
+            WHERE id = ?
+        """, (int(selected_run_id),)).fetchone()
+
+    finally:
+        connection.close()
+
+    dc_power_kwp = (
+        run_parameters[0] * run_parameters[1] / 1000
+    )
+
+    bias = (
+        comparison_df["predicted_energy_kwh"]
+        - comparison_df["actual_energy_kwh"]
+    ).mean()
+
+    nmae_percent = (mae / dc_power_kwp) * 100
+    nrmse_percent = (rmse / dc_power_kwp) * 100
+
+    st.caption(
+        f"Normalize MAE: %{nmae_percent:.2f} | "
+        f"Normalize RMSE: %{nrmse_percent:.2f} | "
+        f"Sistematik Sapma (Bias): {bias:+.2f} kWh"
+    )
 
     col1, col2, col3 = st.columns(3)
 
@@ -1420,5 +1934,17 @@ else:
             }
         )
 
+st.divider()
 
+st.caption(
+    "Hava durumu verileri: Open-Meteo | "
+    "Konum arama verileri: GeoNames / Open-Meteo"
+)
+
+st.markdown(
+    "[Open-Meteo](https://open-meteo.com/) · "
+    "[Veri lisansı ve kullanım koşulları]"
+    "(https://open-meteo.com/en/terms) · "
+    "[GeoNames](https://www.geonames.org/)"
+)
 

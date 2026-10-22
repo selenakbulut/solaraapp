@@ -1,11 +1,41 @@
 import sqlite3
 import requests
+import os
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 
 def save_weather_data(site_id, tilt, azimuth):
-    now = datetime.now(ZoneInfo("Europe/Istanbul"))
+    connection = sqlite3.connect("solar.db")
+    connection.execute("PRAGMA foreign_keys = ON")
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT name, latitude, longitude, timezone
+        FROM sites
+        WHERE id = ?
+    """, (site_id,))
+
+    site = cursor.fetchone()
+
+    if site is None:
+        connection.close()
+        raise ValueError("Santral bulunamadı.")
+
+    site_name, latitude, longitude, site_timezone = site
+
+    if not site_timezone:
+        site_timezone = "Europe/Istanbul"
+        print("Saat dilimi kayitli degil. Varsayilan: Europe/Istanbul")
+
+    try:
+        now = datetime.now(ZoneInfo(site_timezone))
+
+    except (KeyError, ValueError) as error:
+        connection.close()
+        raise ValueError(
+            f"Gecersiz saat dilimi: {site_timezone}"
+        ) from error
 
     start = now.replace(
         minute=0,
@@ -18,29 +48,11 @@ def save_weather_data(site_id, tilt, azimuth):
     start_time = start.strftime("%Y-%m-%dT%H:%M")
     end_time = end.strftime("%Y-%m-%dT%H:%M")
 
-    print("Tahmin başlangıcı:", start_time)
-    print("Tahmin bitişi:", end_time)
-
-    connection = sqlite3.connect("solar.db")
-    connection.execute("PRAGMA foreign_keys = ON")
-    cursor = connection.cursor()
-
-    cursor.execute("""
-        SELECT name, latitude, longitude
-        FROM sites
-        WHERE id = ?
-    """, (site_id,))
-
-    site = cursor.fetchone()
-
-    if site is None:
-        connection.close()
-        raise ValueError("Santral bulunamadı.")
-
-    site_name, latitude, longitude = site
-
-    print("Seçilen santral:", site_name)
+    print("Secilen santral:", site_name)
     print("Koordinatlar:", latitude, longitude)
+    print("Saat dilimi:", site_timezone)
+    print("Tahmin baslangici:", start_time)
+    print("Tahmin bitisi:", end_time)
 
     start = datetime.fromisoformat(start_time)
     end = datetime.fromisoformat(end_time)
@@ -103,6 +115,45 @@ def save_weather_data(site_id, tilt, azimuth):
     else:
         print("Eksik veriler için API isteği gönderiliyor.")
 
+        daily_api_limit = int(
+            os.getenv("SOLAR_DAILY_API_LIMIT", "50")
+        )
+
+        turkey_now = datetime.now(ZoneInfo("Europe/Istanbul"))
+
+        day_start = turkey_now.replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0
+        )
+
+        day_end = day_start + timedelta(days=1)
+
+        utc_start = day_start.astimezone(timezone.utc).isoformat()
+        utc_end = day_end.astimezone(timezone.utc).isoformat()
+
+        cursor.execute("""
+            SELECT COUNT(*)
+            FROM api_requests
+            WHERE requested_at >= ?
+              AND requested_at < ?
+        """, (utc_start, utc_end))
+
+        daily_request_count = cursor.fetchone()[0]
+
+        print("Bugunku API istek sayisi:", daily_request_count)
+        print("Gunluk uygulama siniri:", daily_api_limit)
+
+        if daily_request_count >= daily_api_limit:
+            connection.close()
+
+            raise requests.RequestException(
+                f"Gunluk API istek sinirina ulasildi: "
+                f"{daily_request_count}/{daily_api_limit}. "
+                "Yeni API istegi gonderilmedi."
+            )
+
         url = "https://api.open-meteo.com/v1/forecast"
 
         params = {
@@ -117,7 +168,7 @@ def save_weather_data(site_id, tilt, azimuth):
             ],
             "tilt": tilt,
             "azimuth": azimuth,
-            "timezone": "Europe/Istanbul",
+            "timezone": site_timezone,
             "start_date": start.date().isoformat(),
             "end_date": (end - timedelta(hours=1)).date().isoformat()
         }
@@ -150,7 +201,28 @@ def save_weather_data(site_id, tilt, azimuth):
 
             connection.commit()
 
-        hourly = response.json()["hourly"]
+            if success == 0:
+                connection.close()
+
+        api_data = response.json()
+
+        hourly = api_data["hourly"]
+
+        estimated_elevation = api_data.get("elevation")
+
+        if estimated_elevation is not None:
+            cursor.execute("""
+                           UPDATE sites
+                           SET elevation = ?
+                           WHERE id = ?
+                             AND elevation IS NULL
+                           """, (
+                               float(estimated_elevation),
+                               site_id
+                           ))
+
+            print("Kaydedilen tahmini rakim:", estimated_elevation, "m")
+
         fetched_at = datetime.now(timezone.utc).isoformat()
         saved_count = 0
 
