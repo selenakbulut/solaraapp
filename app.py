@@ -73,7 +73,8 @@ site_df = pd.read_sql_query("""
                                    ac_power_kw,
                                    site_age_years,
                                    tilt,
-                                   azimuth
+                                   azimuth,
+                                   mounting_type
                             FROM sites
                             ORDER BY name
                             """, connection)
@@ -91,6 +92,13 @@ selected_site_id = st.selectbox(
 site = site_df.loc[
     site_df["id"] == selected_site_id
     ].iloc[0]
+
+mounting_type = site["mounting_type"]
+
+st.write(
+    "Montaj Tipi:",
+    mounting_type if pd.notna(mounting_type) else "Belirtilmemiş"
+)
 
 if "site_success_message" in st.session_state:
     st.success(
@@ -294,11 +302,15 @@ with st.expander("➕ Yeni Santral Ekle"):
             value=0
         )
 
+        new_mounting_type = st.selectbox(
+            "Montaj Tipi",
+            ["Arazi", "Çatı", "İzleyici"],
+            index=0
+        )
+
         st.caption(
-            "Montaj tipi: Arazi tipi (varsayılan). "
-            "Panel açıları sabit kabul edilir. "
-            "Montaj tipine özel soğutma etkileri "
-            "henüz hesaplanmamaktadır."
+            "Varsayılan: Arazi. Montaj tipine özel soğutma "
+            "ve izleme hareketleri henüz modellenmemektedir."
         )
 
         new_site_submitted = st.form_submit_button(
@@ -394,7 +406,6 @@ if new_site_submitted:
                     "Bu santral aynı isim ve teknik bilgilerle zaten kayıtlı!"
                 )
             else:
-                new_mounting_type = "Arazi"
                 cursor.execute("""
                                INSERT INTO sites (name, latitude, longitude,
                                                   panel_count, panel_power_wp,

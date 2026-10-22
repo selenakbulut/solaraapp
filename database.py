@@ -55,49 +55,6 @@ for column_name, column_type in new_columns.items():
         logger.info("%s zaten mevcut.", column_name)
 
 
-site_name = "Ankara GES"
-
-cursor.execute(
-    "SELECT * FROM sites WHERE name = ?",
-    (site_name,)
-)
-
-existing_site = cursor.fetchone()
-
-if existing_site is None:
-    cursor.execute("""
-        INSERT INTO sites (name, latitude, longitude, tilt, azimuth)
-        VALUES (?, ?, ?, ?, ?)
-    """, (site_name, 39.9334, 32.8597, 20, 0))
-
-    logger.info("Yeni santral eklendi.")
-else:
-    logger.info("Bu santral zaten kayıtlı.")
-
-
-cursor.execute("""
-    UPDATE sites
-    SET
-        panel_count = ?,
-        panel_power_wp = ?,
-        ac_power_kw = ?,
-        site_age_years = ?
-    WHERE name = ?
-      AND panel_count IS NULL
-      AND panel_power_wp IS NULL
-      AND ac_power_kw IS NULL
-      AND site_age_years IS NULL
-""", (
-    20,
-    500,
-    8,
-    5,
-    "Ankara GES"
-))
-
-logger.info("Ankara GES teknik bilgileri kontrol edildi.")
-
-
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS weather_data (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -130,25 +87,6 @@ CREATE TABLE IF NOT EXISTS api_requests (
 """)
 
 logger.info("api_requests tablosu hazır.")
-
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS production_forecasts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    site_id INTEGER NOT NULL,
-    forecast_time TEXT NOT NULL,
-    predicted_energy_kwh REAL NOT NULL,
-    tilt REAL NOT NULL,
-    azimuth REAL NOT NULL,
-    calculated_at TEXT NOT NULL,
-
-    FOREIGN KEY (site_id) REFERENCES sites(id),
-
-    UNIQUE (site_id, forecast_time, tilt, azimuth)
-)
-""")
-
-logger.info("production_forecasts tablosu hazır.")
 
 
 cursor.execute("""

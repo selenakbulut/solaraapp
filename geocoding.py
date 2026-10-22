@@ -113,6 +113,11 @@ def get_coordinates(location_name: str):
             return None
 
         place = results[0]
+        if (
+                place["name"].strip().casefold().replace("\u0307", "")
+                != query_name.replace("\u0307", "")
+        ):
+            return None
 
         result = {
             "name": place["name"],
