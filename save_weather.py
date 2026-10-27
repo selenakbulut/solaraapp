@@ -37,11 +37,12 @@ def save_weather_data(site_id, tilt, azimuth):
             f"Gecersiz saat dilimi: {site_timezone}"
         ) from error
 
-    start = now.replace(
+    start = (now + timedelta(days=1)).replace(
+        hour=0,
         minute=0,
         second=0,
         microsecond=0
-    ) + timedelta(hours=1)
+    )
 
     end = start + timedelta(hours=72)
 
